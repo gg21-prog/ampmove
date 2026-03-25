@@ -1,0 +1,34 @@
+# MuJoCo auto-generated
+MUJOCO_LOG.TXT
+mjmodel.xml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual envs
+retarget_env/
+mujoco_env/
+.venv/
+venv/
+
+# Training outputs (large, generated)
+logs/
+checkpoints/
+*.zip
+
+# Large binary assets (get from iRonCub model package)
+assets/iRonCub/meshes/
+assets/iRonCub/conf/
+
+# Stale / superseded
+utils/
+tests/
+
+# Editor / OS
+.DS_Store
+*.swp

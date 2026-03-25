@@ -1,0 +1,28 @@
+robot_model: iRonCub-Mk1_1
+urdf_path: assets/iRonCub/robots/iRonCub-Mk1_1/model.urdf
+
+human_to_robot_map:
+  # Base
+  Hips: root_link
+
+  # Left leg
+  LeftUpLeg: l_hip_pitch
+  LeftLeg: l_knee
+  LeftFoot: l_ankle_pitch
+
+  # Right leg
+  RightUpLeg: r_hip_pitch
+  RightLeg: r_knee
+  RightFoot: r_ankle_pitch
+
+  # Left arm
+  LeftArm: l_shoulder_pitch
+  LeftForeArm: l_elbow
+
+  # Right arm
+  RightArm: r_shoulder_pitch
+  RightForeArm: r_elbow
+
+end_effectors:
+  - l_sole_1
+  - r_sole_1
