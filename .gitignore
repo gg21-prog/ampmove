@@ -22,7 +22,6 @@ checkpoints/
 *.zip
 
 # Large binary assets (get from iRonCub model package)
-assets/iRonCub/meshes/
 assets/iRonCub/conf/
 
 # Stale / superseded
