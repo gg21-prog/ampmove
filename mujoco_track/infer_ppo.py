@@ -15,7 +15,7 @@ from pathlib import Path
 from stable_baselines3 import PPO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from envs.ironcub_walk_env import IronCubWalkEnv
+from mujoco_track.env import IronCubWalkEnv
 
 
 def main():

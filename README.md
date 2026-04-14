@@ -31,31 +31,32 @@ ampmove/
 │   ├── meshes/stl/                        # STL meshes (tracked in repo)
 │   ├── meshes/obj/                        # OBJ meshes (tracked in repo)
 │   └── robots/iRonCub-Mk1_1/
-│       ├── model.urdf                     # used by iDynTree (retargeting FK)
-│       ├── model_stl.urdf                 # used by MuJoCo + Isaac Lab USD conversion
+│       ├── model.urdf                     # iDynTree FK (retargeting)
+│       ├── model_stl.urdf                 # MuJoCo + Isaac Lab USD conversion
 │       └── ironcub.usd                   # generated per-machine (see Isaac Lab setup)
 │
 ├── configs/
 │   └── ironcub_bvh_mapping.yaml
-│
-├── envs/
-│   └── ironcub_walk_env.py                # Gymnasium env for PPO (26-DOF, position control)
-│
-├── isaaclab/
-│   └── ironcub_cfg.py                     # ArticulationCfg for Isaac Lab
 │
 ├── motion_priors/walking/
 │   ├── 07_12.bvh                          # source CMU mocap (walking, subject 07)
 │   ├── 07_12_retargeted_adherent.npy      # retargeted motion (root pose + joint angles)
 │   └── 07_12_isaaclab.npz                # Isaac Lab AMP input (FK link states + contacts)
 │
-└── scripts/
-    ├── retarget_bvh_smoothed.py           # BVH → .npy
-    ├── convert_to_isaaclab.py             # .npy → .npz (FK states + contacts for AMP)
-    ├── visualize_retargeted.py            # motion replay in MuJoCo viewer
-    ├── simulate_isaaclab.py               # motion replay in Isaac Lab viewer
-    ├── train_ppo.py                       # SB3 PPO training
-    └── infer_ppo.py                       # load checkpoint + visualize
+├── retargeting/
+│   ├── retarget_bvh_npy.py               # BVH → .npy
+│   └── npy_to_npz.py                     # .npy → .npz (FK states + contacts for AMP)
+│
+├── mujoco_track/
+│   ├── env.py                             # Gymnasium env (26-DOF, position control)
+│   ├── visualize_retargeted.py            # motion replay in MuJoCo viewer
+│   ├── train_ppo.py                       # SB3 PPO training
+│   └── infer_ppo.py                       # load checkpoint + visualize
+│
+└── isaac_lab_track/
+    ├── ironcub_cfg.py                     # ArticulationCfg
+    ├── visualize_retargeted.py            # motion replay in Isaac Lab viewer
+    └── (task.py, train_amp.py — pending)
 ```
 
 ---
@@ -93,14 +94,17 @@ pip install mujoco==3.3.0 bvh scipy numpy stable-baselines3 gymnasium
 
 ```bash
 # Train
-python scripts/train_ppo.py
-python scripts/train_ppo.py --timesteps 3000000 --n-envs 4
+python mujoco_track/train_ppo.py
+python mujoco_track/train_ppo.py --timesteps 3000000 --n-envs 4
 
 # Resume
-python scripts/train_ppo.py --resume logs/ppo_ironcub/best_model.zip
+python mujoco_track/train_ppo.py --resume logs/ppo_ironcub/best_model.zip
 
-# Visualize
-python scripts/infer_ppo.py logs/ppo_ironcub/best_model.zip
+# Visualize policy
+python mujoco_track/infer_ppo.py logs/ppo_ironcub/best_model.zip
+
+# Visualize retargeted motion
+python mujoco_track/visualize_retargeted.py
 ```
 
 Checkpoints → `checkpoints/ppo_ironcub/`, best model → `logs/ppo_ironcub/best_model.zip`.
@@ -125,8 +129,8 @@ python {ISAACLAB}/scripts/tools/convert_urdf.py \
 ### Step 2 — Simulate (motion replay, no RL)
 
 ```bash
-python scripts/simulate_isaaclab.py
-python scripts/simulate_isaaclab.py --headless
+python isaac_lab_track/visualize_retargeted.py
+python isaac_lab_track/visualize_retargeted.py --headless
 ```
 
 Replays `07_12_retargeted_adherent.npy` at 120fps — good for verifying the asset and motion look correct before training.
@@ -140,13 +144,13 @@ Replays `07_12_retargeted_adherent.npy` at 120fps — good for verifying the ass
 
 ```bash
 # BVH → retargeted .npy
-python scripts/retarget_bvh_smoothed.py \
+python retargeting/retarget_bvh_npy.py \
     motion_priors/walking/07_12.bvh \
     motion_priors/walking/07_12_retargeted_adherent.npy \
     configs/ironcub_bvh_mapping.yaml
 
 # .npy → Isaac Lab .npz
-python scripts/convert_to_isaaclab.py \
+python retargeting/npy_to_npz.py \
     motion_priors/walking/07_12_retargeted_adherent.npy \
     motion_priors/walking/07_12_isaaclab.npz
 ```

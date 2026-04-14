@@ -22,7 +22,7 @@ from stable_baselines3.common.monitor import Monitor
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from envs.ironcub_walk_env import IronCubWalkEnv
+from mujoco_track.env import IronCubWalkEnv
 
 LOG_DIR  = Path("logs/ppo_ironcub")
 SAVE_DIR = Path("checkpoints/ppo_ironcub")
