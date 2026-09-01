@@ -69,11 +69,12 @@ class IronCubAMPEnvCfg(DirectRLEnvCfg):
     # robot — caller sets this via IronCubAMPEnvCfg(robot_cfg=IRONCUB_CFG)
     robot_cfg: ArticulationCfg = None   # type: ignore
 
-    # reward weights
-    alive_w:   float = 2.0
-    forward_w: float = 1.5
-    upright_w: float = 1.0
-    ctrl_w:    float = 0.001
+    # reward weights — tuned to match MuJoCo baseline philosophy:
+    #   survival >> style, forward only rewarded when upright
+    alive_w:   float = 5.0    # strong survival signal
+    forward_w: float = 0.5    # forward bonus, but gated by upright in _get_rewards
+    upright_w: float = 3.0    # upright posture (matches MuJoCo exp(-5*tilt) weight)
+    ctrl_w:    float = 0.001  # small action regularisation
 
 
 class IronCubAMPEnv(DirectRLEnv):
@@ -244,10 +245,13 @@ class IronCubAMPEnv(DirectRLEnv):
         h         = self.robot.data.root_pos_w[:, 2]
         forward_v = self.robot.data.root_lin_vel_w[:, 0]
         grav_b    = self.robot.data.projected_gravity_b
+
+        # Upright score: 1 when vertical, decays with tilt (matches MuJoCo upright gate)
         upright   = torch.exp(-5.0 * (grav_b[:, 0] ** 2 + grav_b[:, 1] ** 2))
 
         alive     = ((h > MIN_HEIGHT) & (h < MAX_HEIGHT)).float() * self.cfg.alive_w
-        forward   = forward_v.clamp(min=0.0) * self.cfg.forward_w
+        # Gate forward by upright: no forward bonus for a falling robot (MuJoCo does this)
+        forward   = forward_v.clamp(min=0.0) * upright * self.cfg.forward_w
         upright_r = upright * self.cfg.upright_w
         ctrl_cost = -self.cfg.ctrl_w * self._actions.square().sum(dim=-1)
 

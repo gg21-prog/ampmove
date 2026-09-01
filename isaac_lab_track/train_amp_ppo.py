@@ -2,17 +2,28 @@
 """
 AMP + PPO training for iRonCub walking — SKRL 2.x.
 
-The AMP discriminator is trained to distinguish robot states from the
-retargeted walking motion prior. PPO handles the policy update.
-Style reward (discriminator) and task reward (alive + forward) are
-combined via task_reward_scale / style_reward_scale.
+Hyperparameters tuned against the MuJoCo baseline that achieved walking:
+  - Survival >> style: alive_w=5, upright_w=3, forward gated by upright
+  - learning_rate=1e-4 (standard Isaac Lab humanoid scale)
+  - task/style = 0.5/0.5 (balanced; shift to 0.3/0.7 once walking emerges)
+  - discriminator_gradient_penalty_scale=5.0 (AMP paper default, not 10)
+  - timesteps default = 1_000_000 (~10 hrs @ 4096 envs on RTX 4090 / 28 it/s)
 
 Usage:
-    # from repo root:
-    OMNI_KIT_ACCEPT_EULA=Y conda run -n polaris --no-capture-output \\
-        python isaac_lab_track/train_amp_ppo.py --headless --num_envs 64
-    python isaac_lab_track/train_amp_ppo.py --headless --num_envs 4096
-    python isaac_lab_track/train_amp_ppo.py --checkpoint logs/amp_ironcub/agent_50000.pt
+    OMNI_KIT_ACCEPT_EULA=Y PYTHONUNBUFFERED=1 conda run -n polaris --no-capture-output \\
+        python isaac_lab_track/train_amp_ppo.py --headless --num_envs 4096 --wandb
+
+    # quick smoke test
+    python isaac_lab_track/train_amp_ppo.py --headless --num_envs 4 --timesteps 200
+
+    # resume
+    python isaac_lab_track/train_amp_ppo.py --headless --checkpoint logs/amp_ironcub/...
+
+Projected wall time (RTX 4090, 4096 envs, ~28 it/s):
+    73K steps  →  43 min  →  ~300M env transitions (AMP paper baseline)
+    200K steps →   2 hrs  →  ~820M env transitions (motion style emerging)
+    500K steps →   5 hrs  →    ~2B env transitions  (clear walking)
+    1M steps   →  10 hrs  →    ~4B env transitions  (good convergence)
 """
 
 import argparse
@@ -21,11 +32,22 @@ from pathlib import Path
 
 # ── AppLauncher must be created before any omni / Isaac Lab imports ───────────
 parser = argparse.ArgumentParser()
-parser.add_argument("--headless",   action="store_true")
-parser.add_argument("--num_envs",   type=int, default=64)
-parser.add_argument("--timesteps",  type=int, default=50_000_000)
-parser.add_argument("--checkpoint", type=str, default=None,
-                    help="Resume from a SKRL agent checkpoint (.pt)")
+parser.add_argument("--headless",    action="store_true")
+parser.add_argument("--num_envs",    type=int,   default=4096)
+parser.add_argument("--timesteps",   type=int,   default=1_000_000,
+                    help="Trainer steps (~28 it/s × 4096 envs on RTX 4090)")
+parser.add_argument("--checkpoint",  type=str,   default=None,
+                    help="Resume from a SKRL checkpoint (.pt)")
+parser.add_argument("--wandb",       action="store_true",
+                    help="Enable Weights & Biases logging (requires: pip install wandb)")
+parser.add_argument("--run_name",    type=str,   default="amp_ironcub",
+                    help="W&B / experiment name")
+parser.add_argument("--lr",          type=float, default=1e-4,
+                    help="Policy + value learning rate (default 1e-4)")
+parser.add_argument("--task_w",      type=float, default=0.5,
+                    help="Task reward weight in AMP total reward (default 0.5)")
+parser.add_argument("--style_w",     type=float, default=0.5,
+                    help="Style (discriminator) reward weight (default 0.5)")
 args, _ = parser.parse_known_args()
 
 from isaaclab.app import AppLauncher
@@ -35,6 +57,7 @@ simulation_app = app_launcher.app
 # ── All other imports after AppLauncher ───────────────────────────────────────
 import torch
 import torch.nn as nn
+import gymnasium
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -47,52 +70,41 @@ from skrl.agents.torch.base import ExperimentCfg
 from skrl.envs.wrappers.torch import wrap_env
 from skrl.memories.torch import RandomMemory
 from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
-from skrl.trainers.torch import SequentialTrainer
+from skrl.trainers.torch import SequentialTrainer, SequentialTrainerCfg
 from skrl.resources.preprocessors.torch import RunningStandardScaler
-
-import gymnasium
 
 LOG_DIR = Path("logs/amp_ironcub")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+
 # ── Model definitions ─────────────────────────────────────────────────────────
 
 class Policy(GaussianMixin, Model):
-    """Actor — maps policy observation to action distribution (Gaussian)."""
-    def __init__(self, observation_space, action_space, device,
-                 clip_actions=False, clip_log_std=True,
-                 min_log_std=-20.0, max_log_std=2.0):
-        # SKRL 2.x: Model.__init__ is keyword-only
-        Model.__init__(self, observation_space=observation_space,
-                       action_space=action_space, device=device)
-        GaussianMixin.__init__(self, clip_actions=clip_actions,
-                               clip_log_std=clip_log_std,
-                               min_log_std=min_log_std, max_log_std=max_log_std)
+    """Actor — Gaussian policy over joint position targets."""
+    def __init__(self, obs_space, act_space, device):
+        Model.__init__(self, observation_space=obs_space, action_space=act_space, device=device)
+        GaussianMixin.__init__(self, clip_actions=False, clip_log_std=True,
+                               min_log_std=-20.0, max_log_std=2.0)
         self.net = nn.Sequential(
-            nn.Linear(self.num_observations, 512),
-            nn.ELU(),
-            nn.Linear(512, 256),
-            nn.ELU(),
+            nn.Linear(self.num_observations, 512), nn.ELU(),
+            nn.Linear(512, 256),                   nn.ELU(),
             nn.Linear(256, self.num_actions),
         )
         self.log_std_parameter = nn.Parameter(torch.zeros(self.num_actions))
 
     def compute(self, inputs, role):
-        # SKRL 2.x: inputs key is "states"; return (actions, {"log_std": ...})
+        # SKRL 2.x: key is "observations"; return (actions, {"log_std": ...})
         return self.net(inputs["observations"]), {"log_std": self.log_std_parameter}
 
 
 class Value(DeterministicMixin, Model):
-    """Critic — estimates value of policy observation."""
-    def __init__(self, observation_space, action_space, device, clip_actions=False):
-        Model.__init__(self, observation_space=observation_space,
-                       action_space=action_space, device=device)
-        DeterministicMixin.__init__(self, clip_actions=clip_actions)
+    """Critic — state value estimator."""
+    def __init__(self, obs_space, act_space, device):
+        Model.__init__(self, observation_space=obs_space, action_space=act_space, device=device)
+        DeterministicMixin.__init__(self, clip_actions=False)
         self.net = nn.Sequential(
-            nn.Linear(self.num_observations, 512),
-            nn.ELU(),
-            nn.Linear(512, 256),
-            nn.ELU(),
+            nn.Linear(self.num_observations, 512), nn.ELU(),
+            nn.Linear(512, 256),                   nn.ELU(),
             nn.Linear(256, 1),
         )
 
@@ -101,16 +113,13 @@ class Value(DeterministicMixin, Model):
 
 
 class Discriminator(DeterministicMixin, Model):
-    """AMP discriminator — classifies env states vs reference motion states."""
-    def __init__(self, observation_space, action_space, device, clip_actions=False):
-        Model.__init__(self, observation_space=observation_space,
-                       action_space=action_space, device=device)
-        DeterministicMixin.__init__(self, clip_actions=clip_actions)
+    """AMP discriminator — real (motion prior) vs fake (policy rollout)."""
+    def __init__(self, obs_space, act_space, device):
+        Model.__init__(self, observation_space=obs_space, action_space=act_space, device=device)
+        DeterministicMixin.__init__(self, clip_actions=False)
         self.net = nn.Sequential(
-            nn.Linear(self.num_observations, 256),
-            nn.ELU(),
-            nn.Linear(256, 128),
-            nn.ELU(),
+            nn.Linear(self.num_observations, 256), nn.ELU(),
+            nn.Linear(256, 128),                   nn.ELU(),
             nn.Linear(128, 1),
         )
 
@@ -122,24 +131,18 @@ class Discriminator(DeterministicMixin, Model):
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\nTraining on: {device}")
 
     # ── Environment ───────────────────────────────────────────────────────────
     env_cfg = IronCubAMPEnvCfg()
-    # In Isaac Lab v2 num_envs lives in scene, not on the top-level cfg
-    env_cfg.scene.num_envs = args.num_envs
+    env_cfg.scene.num_envs = args.num_envs   # num_envs lives in scene in Isaac Lab v2
     env_cfg.robot_cfg = IRONCUB_CFG
-
     raw_env = IronCubAMPEnv(cfg=env_cfg, render_mode=None)
     env     = wrap_env(raw_env, wrapper="isaaclab")
 
-    # ── Observation / action spaces for models ────────────────────────────────
-    policy_obs_space = gymnasium.spaces.Box(
-        low=-float("inf"), high=float("inf"), shape=(OBS_DIM,))
-    amp_obs_space    = gymnasium.spaces.Box(
-        low=-float("inf"), high=float("inf"), shape=(AMP_DIM,))
-    act_space        = gymnasium.spaces.Box(
-        low=-1.0, high=1.0, shape=(ACT_DIM,))
+    # ── Observation / action spaces ───────────────────────────────────────────
+    policy_obs_space = gymnasium.spaces.Box(-float("inf"), float("inf"), shape=(OBS_DIM,))
+    amp_obs_space    = gymnasium.spaces.Box(-float("inf"), float("inf"), shape=(AMP_DIM,))
+    act_space        = gymnasium.spaces.Box(-1.0, 1.0, shape=(ACT_DIM,))
 
     # ── Models ────────────────────────────────────────────────────────────────
     models = {
@@ -151,40 +154,35 @@ def main():
     # ── Memories ──────────────────────────────────────────────────────────────
     rollout_memory = RandomMemory(memory_size=16, num_envs=env.num_envs, device=device)
 
-    # Motion dataset: filled at init with reference frames from the motion prior.
-    # RandomMemory with num_envs=1 accepts bulk add_samples((N, dim)) tensors.
-    MOTION_DATASET_SIZE = 200_000
-    motion_dataset = RandomMemory(memory_size=MOTION_DATASET_SIZE, num_envs=1, device=device)
+    # motion_dataset: filled at init; num_envs=1 accepts bulk (N, dim) add_samples
+    motion_dataset = RandomMemory(memory_size=200_000, num_envs=1, device=device)
+    reply_buffer   = RandomMemory(memory_size=1_000_000, num_envs=1, device=device)
 
-    # Replay buffer: AMP uses this to prevent discriminator overfitting
-    REPLAY_BUFFER_SIZE = 1_000_000
-    reply_buffer = RandomMemory(memory_size=REPLAY_BUFFER_SIZE, num_envs=1, device=device)
-
-    # ── AMP agent config (SKRL 2.x: dataclass, not dict) ─────────────────────
+    # ── AMP config (SKRL 2.x dataclass) ──────────────────────────────────────
     cfg = AMP_CFG(
-        # PPO hyperparameters
+        # PPO
         rollouts=16,
         learning_epochs=6,
         mini_batches=2,
         discount_factor=0.99,
         gae_lambda=0.95,
-        learning_rate=5e-5,
+        learning_rate=args.lr,          # default 1e-4 (was 5e-5 — too slow)
         grad_norm_clip=1.0,
         ratio_clip=0.2,
         value_loss_scale=2.0,
         entropy_loss_scale=0.0,
 
-        # AMP discriminator
+        # AMP discriminator — using AMP paper defaults
         amp_batch_size=512,
-        discriminator_batch_size=-1,           # use full amp_batch_size
-        discriminator_gradient_penalty_scale=10.0,
+        discriminator_batch_size=-1,
+        discriminator_gradient_penalty_scale=5.0,   # AMP paper default (was 10 — too aggressive)
         discriminator_logit_regularization_scale=0.05,
         discriminator_weight_decay_scale=1e-4,
         discriminator_loss_scale=5.0,
 
-        # Reward mixing
-        task_reward_scale=0.3,
-        style_reward_scale=0.7,
+        # Reward mixing — balanced to start; CLI args let you tune without editing
+        task_reward_scale=args.task_w,   # default 0.5
+        style_reward_scale=args.style_w, # default 0.5
 
         # Observation preprocessing
         observation_preprocessor=RunningStandardScaler,
@@ -194,12 +192,14 @@ def main():
         amp_observation_preprocessor=RunningStandardScaler,
         amp_observation_preprocessor_kwargs={"size": amp_obs_space, "device": device},
 
-        # Logging / saving
+        # Logging
         experiment=ExperimentCfg(
             directory=str(LOG_DIR),
-            experiment_name="amp_ironcub",
-            write_interval=100,
-            checkpoint_interval=1000,
+            experiment_name=args.run_name,
+            write_interval=200,       # every 200 steps (~7s at 28 it/s)
+            checkpoint_interval=5000, # every 5K steps (~3 min)
+            wandb=args.wandb,
+            wandb_kwargs={"project": "ampmove-ironcub", "entity": "gg21", "name": args.run_name} if args.wandb else {},
         ),
     )
 
@@ -220,17 +220,25 @@ def main():
         print(f"Resuming from checkpoint: {args.checkpoint}")
         agent.load(args.checkpoint)
 
-    # ── Trainer ───────────────────────────────────────────────────────────────
-    from skrl.trainers.torch import SequentialTrainerCfg
-    trainer_cfg = SequentialTrainerCfg(
-        timesteps=args.timesteps,
-        headless=args.headless,
+    # ── Projected time estimate ───────────────────────────────────────────────
+    ITS = 28  # measured it/s at 4096 envs on RTX 4090
+    secs = args.timesteps / ITS
+    hrs  = secs / 3600
+    env_transitions = args.timesteps * args.num_envs
+    print(f"\nTraining on: {device}")
+    print(f"  {args.num_envs} envs  |  {args.timesteps:,} trainer steps")
+    print(f"  ~{env_transitions/1e9:.1f}B env transitions")
+    if args.num_envs == 4096:
+        print(f"  Estimated wall time: {hrs:.1f} hrs  ({secs/60:.0f} min) at ~{ITS} it/s")
+    print(f"  task_w={args.task_w}  style_w={args.style_w}  lr={args.lr}")
+    print(f"  W&B: {'enabled → gg21/ampmove-ironcub/' + args.run_name if args.wandb else 'disabled (pass --wandb to enable)'}\n")
+
+    trainer = SequentialTrainer(
+        cfg=SequentialTrainerCfg(timesteps=args.timesteps, headless=args.headless),
+        env=env,
+        agents=agent,
     )
-    trainer = SequentialTrainer(cfg=trainer_cfg, env=env, agents=agent)
-
-    print(f"Starting AMP+PPO  |  {args.num_envs} envs  |  {args.timesteps:,} steps\n")
     trainer.train()
-
     simulation_app.close()
 
 
