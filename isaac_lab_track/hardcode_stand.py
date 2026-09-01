@@ -24,14 +24,14 @@ parser.add_argument("--headless", action="store_true")
 parser.add_argument("--duration", type=float, default=10.0)
 args, _ = parser.parse_known_args()
 
-from omni.isaac.lab.app import AppLauncher
+from isaaclab.app import AppLauncher
 app_launcher = AppLauncher(headless=args.headless)
 simulation_app = app_launcher.app
 
 import torch
-import omni.isaac.lab.sim as sim_utils
-from omni.isaac.lab.assets import Articulation
-from omni.isaac.lab.sim import SimulationContext
+import isaaclab.sim as sim_utils
+from isaaclab.assets import Articulation
+from isaaclab.sim import SimulationContext
 
 REPO_ROOT  = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -48,12 +48,15 @@ STAND_POSE = {
     "r_knee":         0.12,
     "l_ankle_pitch":  0.06,
     "r_ankle_pitch":  0.06,
+    # Elbows have limits [0.262, 1.850] rad; 0.0 is out of range
+    "l_elbow":        0.5,
+    "r_elbow":        0.5,
 }
 
 
 def build_scene() -> Articulation:
     sim_utils.spawn_ground_plane("/World/ground", sim_utils.GroundPlaneCfg())
-    sim_utils.spawn_distant_light(
+    sim_utils.spawn_light(
         "/World/light",
         sim_utils.DistantLightCfg(intensity=3000.0, color=(1.0, 1.0, 1.0)),
     )

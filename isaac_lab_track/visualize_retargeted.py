@@ -22,15 +22,15 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--headless", action="store_true")
 args, _ = parser.parse_known_args()
 
-from omni.isaac.lab.app import AppLauncher
+from isaaclab.app import AppLauncher
 app_launcher = AppLauncher(headless=args.headless)
 simulation_app = app_launcher.app
 
 import numpy as np
 import torch
-import omni.isaac.lab.sim as sim_utils
-from omni.isaac.lab.assets import Articulation
-from omni.isaac.lab.sim import SimulationContext
+import isaaclab.sim as sim_utils
+from isaaclab.assets import Articulation
+from isaaclab.sim import SimulationContext
 
 REPO_ROOT   = Path(__file__).resolve().parent.parent
 MOTION_PATH = REPO_ROOT / "motion_priors/walking/07_12_retargeted_adherent.npy"

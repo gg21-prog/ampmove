@@ -10,9 +10,9 @@ Requires the USD asset to be generated first (run once per machine):
 
 from pathlib import Path
 
-import omni.isaac.lab.sim as sim_utils
-from omni.isaac.lab.actuators import ImplicitActuatorCfg
-from omni.isaac.lab.assets import ArticulationCfg
+import isaaclab.sim as sim_utils
+from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.assets import ArticulationCfg
 
 USD_PATH = str(
     Path(__file__).resolve().parent.parent
@@ -20,6 +20,8 @@ USD_PATH = str(
 )
 
 IRONCUB_CFG = ArticulationCfg(
+    # prim_path is overridden per-env in _setup_scene; this satisfies validate()
+    prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
         usd_path=USD_PATH,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -35,6 +37,11 @@ IRONCUB_CFG = ArticulationCfg(
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.57),
         rot=(1.0, 0.0, 0.0, 0.0),  # wxyz — upright
+        joint_pos={
+            # Elbows have limits [0.262, 1.850] rad; default 0 is out of range
+            "l_elbow": 0.5,
+            "r_elbow": 0.5,
+        },
     ),
     actuators={
         "legs": ImplicitActuatorCfg(

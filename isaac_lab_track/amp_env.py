@@ -23,12 +23,12 @@ import gymnasium
 import numpy as np
 import torch
 
-import omni.isaac.lab.sim as sim_utils
-from omni.isaac.lab.assets import ArticulationCfg, Articulation
-from omni.isaac.lab.envs import DirectRLEnv, DirectRLEnvCfg
-from omni.isaac.lab.scene import InteractiveSceneCfg
-from omni.isaac.lab.sim import SimulationCfg
-from omni.isaac.lab.utils import configclass
+import isaaclab.sim as sim_utils
+from isaaclab.assets import ArticulationCfg, Articulation
+from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sim import SimulationCfg
+from isaaclab.utils import configclass
 
 REPO_ROOT   = Path(__file__).resolve().parent.parent
 MOTION_PATH = REPO_ROOT / "motion_priors/walking/07_12_isaaclab.npz"
@@ -45,7 +45,7 @@ DECIMATION  = round(CONTROL_DT / PHYSICS_DT)   # = 4
 MIN_HEIGHT  = 0.35
 MAX_HEIGHT  = 0.90
 
-FOOT_NAMES  = ["l_sole_1", "r_sole_1"]
+FOOT_NAMES  = ["l_foot", "r_foot"]
 
 
 @configclass
@@ -230,9 +230,12 @@ class IronCubAMPEnv(DirectRLEnv):
 
     def _get_observations(self) -> dict:
         self._phase = (self._phase + self._phase_step) % 1.0
+        amp_state = self._compute_amp_state()  # (E,64)
+        # SKRL AMP agent reads amp_obs from infos (self.extras), not from obs dict
+        self.extras["amp_obs"] = amp_state
         return {
             "policy": self._compute_policy_obs(),  # (E,62)
-            "amp":    self._compute_amp_state(),   # (E,64)
+            "amp":    amp_state,
         }
 
     # ── Rewards ───────────────────────────────────────────────────────────────
@@ -259,9 +262,7 @@ class IronCubAMPEnv(DirectRLEnv):
         return fallen, time_out
 
     # ── Extras ────────────────────────────────────────────────────────────────
-
-    def _get_extras(self) -> dict:
-        return {}
+    # DirectRLEnv v2 uses self.extras dict rather than _get_extras(); nothing to do.
 
     # ── Reset ─────────────────────────────────────────────────────────────────
 
