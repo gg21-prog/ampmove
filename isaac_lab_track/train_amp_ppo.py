@@ -48,6 +48,8 @@ parser.add_argument("--task_w",      type=float, default=0.5,
                     help="Task reward weight in AMP total reward (default 0.5)")
 parser.add_argument("--style_w",     type=float, default=0.5,
                     help="Style (discriminator) reward weight (default 0.5)")
+parser.add_argument("--reset_disc",  action="store_true",
+                    help="Re-init discriminator weights from scratch after loading checkpoint (fixes collapsed disc)")
 args, _ = parser.parse_known_args()
 
 from isaaclab.app import AppLauncher
@@ -175,12 +177,12 @@ def main():
         # AMP discriminator — using AMP paper defaults
         amp_batch_size=512,
         discriminator_batch_size=-1,
-        discriminator_gradient_penalty_scale=5.0,   # AMP paper default (was 10 — too aggressive)
+        discriminator_gradient_penalty_scale=20.0,  # run3: doubled from 10 — disc was fully collapsed at 0.021 for 400K steps
         discriminator_logit_regularization_scale=0.05,
         discriminator_weight_decay_scale=1e-4,
-        discriminator_loss_scale=5.0,
+        discriminator_loss_scale=1.0,               # run3: halved from 2.5 — much weaker disc updates, policy already good
 
-        # Reward mixing — balanced to start; CLI args let you tune without editing
+        # Reward mixing
         task_reward_scale=args.task_w,   # default 0.5
         style_reward_scale=args.style_w, # default 0.5
 
@@ -199,7 +201,8 @@ def main():
             write_interval=200,       # every 200 steps (~7s at 28 it/s)
             checkpoint_interval=5000, # every 5K steps (~3 min)
             wandb=args.wandb,
-            wandb_kwargs={"project": "ampmove-ironcub", "entity": "gg21", "name": args.run_name} if args.wandb else {},
+            wandb_kwargs={"project": "ampmove-ironcub", "name": args.run_name,
+                          "sync_tensorboard": False} if args.wandb else {},
         ),
     )
 
@@ -219,6 +222,37 @@ def main():
     if args.checkpoint:
         print(f"Resuming from checkpoint: {args.checkpoint}")
         agent.load(args.checkpoint)
+
+    if args.reset_disc:
+        # Re-initialise discriminator weights from scratch.
+        # Use case: disc collapsed in a prior run → policy is good but style signal is dead.
+        # We keep policy + value weights and give the disc a fresh start to learn against
+        # a policy that already produces reasonable-looking states.
+        disc_model = models["discriminator"]
+        def _reset_weights(m):
+            if hasattr(m, "reset_parameters"):
+                m.reset_parameters()
+        disc_model.apply(_reset_weights)
+        print("Discriminator weights reset to random init.")
+
+    # Patch SKRL's custom SummaryWriter to also push to W&B directly.
+    # SKRL uses its own writer (not torch.utils.tensorboard) so sync_tensorboard=True
+    # never intercepts its writes — we have to hook add_scalar ourselves.
+    if args.wandb and hasattr(agent, "writer") and agent.writer is not None:
+        import wandb as _wandb
+        _orig_add_scalar = agent.writer.add_scalar
+        _pending: dict = {}
+
+        def _patched_add_scalar(*, tag, value, timestep):
+            _orig_add_scalar(tag=tag, value=value, timestep=timestep)
+            _pending[tag] = value
+            # Commit once we've seen a "Reward" tag (last in each write batch)
+            if tag.startswith("Stats"):
+                _wandb.log(_pending.copy(), step=timestep)
+                _pending.clear()
+
+        agent.writer.add_scalar = _patched_add_scalar
+        print("W&B direct logging patch applied.")
 
     # ── Projected time estimate ───────────────────────────────────────────────
     ITS = 28  # measured it/s at 4096 envs on RTX 4090
